@@ -301,26 +301,8 @@ class WabbitHDF5file:
             return
         level_num = int(level_num)
 
-        # alter values, we need to copy first line as we have redundant setting - this assumes periodicity
-        block_red = np.zeros(np.array(block_values.shape)+1-includes_g)
-        if not includes_g:
-            if dim == 2:
-                block_red[:-1,:-1] = block_values[:,:]   # copy interior
-                block_red[ -1,:-1] = block_values[0,:]   # copy x-line
-                block_red[:-1, -1] = block_values[:,0]   # copy y-line
-                block_red[ -1, -1] = block_values[0,0]   # copy last corner
-            else:
-                block_red[:-1,:-1,:-1] = block_values[:,:,:]   # copy interior
-                block_red[ -1,:-1,:-1] = block_values[0,:,:]   # copy x-face
-                block_red[:-1, -1,:-1] = block_values[:,0,:]   # copy y-face
-                block_red[:-1,:-1, -1] = block_values[:,:,0]   # copy z-face
-                block_red[ -1, -1,:-1] = block_values[0,0,:]   # copy xy-edge
-                block_red[ -1,:-1, -1] = block_values[0,:,0]   # copy xz-edge
-                block_red[:-1, -1, -1] = block_values[:,0,0]   # copy yz-edge
-                block_red[ -1, -1, -1] = block_values[0,0,0]   # copy last corner
-        else:
-            if dim == 2: block_red[:,:] = block_values[:,:]   # copy interior
-            if dim == 3: block_red[:,:,:] = block_values[:,:,:]   # copy interior
+        # we have redundant setting, so the last point is a ghost point that has to be added, so that we have [1, 2, ..., N, 1]
+        block_red = np.pad(block_values, (0, 1), mode='wrap') if not includes_g else block_values
 
         number_blocks = 2**(level_num*dim)
         treecode = np.zeros(number_blocks)
@@ -1129,7 +1111,7 @@ def tcb_level_2_tcarray(tc_b, level, max_level=21, dim=3):
     # extract number of each level
     # level <= i_level ensures -1 values are inserted for unset levels
     for i_level in np.arange(max_level)+1:
-        tc_array[:, i_level-1] = tc_get_digit_at_level(tc_b, i_level, max_level=max_level, dim=dim) - (level <= i_level)
+        tc_array[:, i_level-1] = tc_get_digit_at_level(tc_b, i_level, max_level=max_level, dim=dim)
     return tc_array
 
 # extract level from treecode array, assume field
@@ -1241,12 +1223,14 @@ def origin2treecode( origin, max_level=21, dim=3, domain_size=[1,1,1] ):
 
 # return coords_spacing from level - we need to check for non-isotrop BS if we might need to invert the indices
 def level2spacing( level, dim=3, block_size=[21,21,21], domain_size=[1,1,1] ):
-    return np.array(domain_size[:dim] / (np.array(block_size[:dim])-1))/(2**level)
+    spacing = np.array(domain_size[:dim] / (np.array(block_size[:dim])-1))/(2**level)
+    return spacing[::-1]  # we are reversing to get Z,Y,X order, in which coords_origin is currently stored
 
 # return coords_spacing from level - we need to check for non-isotrop BS if we might need to invert the indices
 def spacing2level( spacing, block_size=[21,21,21], domain_size=[1,1,1] ):
-    if np.any(spacing[:] == 0): return np.infty
-    level = np.log2(domain_size[0]/((block_size[0]-1)*spacing[0]))
+    spacing_n = np.copy(spacing[::-1])  # coords_spacing is in Z,Y,X order and we are reversing to get X,Y,Z order, in which tc_encoding and tc_decoding work
+    if np.any(spacing_n[:] == 0): return np.infty
+    level = np.log2(domain_size[0]/((block_size[0]-1)*spacing_n[0]))
     if level - np.rint(level) > 0.1:
         print(f"Level deviates much from integer: {level}")
     return np.rint( level ).astype(int)
