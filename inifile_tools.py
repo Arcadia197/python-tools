@@ -341,6 +341,7 @@ def check_parameters_for_stupid_errors( file ):
         print(field_names)
     
     if "vor" in field_names and dim==2:
+        # JB: those errors are outdated
         if not field_names[0] == "vor":
             bcolors.err('You want to save the vorticity, but you MUST choose this as first entry in field_names. Strange, right? At least it is nice outside. Go play.')
         if N_fields_saved < 3:
@@ -348,7 +349,7 @@ def check_parameters_for_stupid_errors( file ):
     
     for field_name in field_names:
         if not field_name in ['ux', 'Ux', 'UX', 'uy', 'Uy', 'UY', 'uz', 'Uz', 'UZ', 'p', 'P', 'vor', 'div', 'mask', 'usx', 'usy', 'usz', 'color', 'sponge', 'scalar1', 'scalar2', 'scalar3']:
-            bcolors.err('In field_names for saving, you have set %s_ %s _%s but that is not a valid choice!' % (bcolors.FAIL,field_name, bcolors.ENDC))
+            bcolors.err('In field_names for saving, you have set %s_ %s _%s but that it might not be a valid choice! (List might not be up to date)' % (bcolors.FAIL,field_name, bcolors.ENDC))
     
     
     
@@ -826,6 +827,7 @@ def prepare_resuming_backup( inifile ):
 
 
     # if used, take care of passive scalar as well
+    # these are named scalar1, scalar2, ...
     if exists_ini_parameter( inifile, 'ACM-new', 'use_passive_scalar' ):
         scalar = get_ini_parameter(inifile, 'ACM-new', 'use_passive_scalar', bool, default=False)
         if scalar:
@@ -833,6 +835,22 @@ def prepare_resuming_backup( inifile ):
 
             for i in range(n_scalars):
                 state_vector_prefixes.append( "scalar%i" % (i+1) )
+
+
+    # if used, take care of time statistics as well
+    # we have to extract their names and set 'read_from_files_time_statistics' to 1
+    time_statistics = False
+    if exists_ini_parameter( inifile, 'Time-Statistics', 'time_statistics' ):
+        time_statistics = get_ini_parameter( inifile, 'Time-Statistics', 'time_statistics', bool, default=False)
+        if time_statistics:
+            n_time_stats = get_ini_parameter( inifile, 'Time-Statistics', 'N_time_statistics', int, default=0)
+
+            time_statistics_names = get_ini_parameter( inifile, 'Time-Statistics', 'time_statistics_names', str, vector=True, default=[])
+            if n_time_stats != len(time_statistics_names):
+                raise ValueError("Something is wrong: N_time_statistics=%i, but only %i names!" % (n_time_stats, len(time_statistics_names)) )
+        
+            # append those names to the list of state vector prefixes
+            for name in time_statistics_names: state_vector_prefixes.append( name )
 
 
 
@@ -924,29 +942,34 @@ def prepare_resuming_backup( inifile ):
 
     f1 = open( inifile, 'r')
     f2 = open( inifile+'.tmptmp', 'w')
-    found, okay1, okay2 = False, False, False
+    section, okay1, okay2, okay3 = '', False, False, not time_statistics
 
     for line in f1:
         # remove trailing space:
         line_cpy = line.strip()
 
-        if '[Physics]' in line_cpy:
-            found = True
+        # extract section name
+        if line_cpy.startswith('[') and line_cpy.endswith(']'):
+            section = line_cpy[1:-1]
 
-        if 'read_from_files=' in line_cpy and found and line_cpy[0] != ";":
+        if 'read_from_files=' in line_cpy and section == 'Physics' and line_cpy[0] != ";":
             line = "read_from_files=1;\n"
             okay1 = True
 
-        if 'input_files=' in line_cpy and found and line_cpy[0] != ";":
+        if 'input_files=' in line_cpy and section == 'Physics' and line_cpy[0] != ";":
             line = "input_files=" + infiles_string + "\n"
             okay2 = True
+
+        if time_statistics and 'read_from_files_time_statistics=' in line_cpy and section == 'Time-Statistics' and line_cpy[0] != ";":
+            line = "read_from_files_time_statistics=1;\n"
+            okay3 = True
 
         f2.write( line )
 
     f1.close()
     f2.close()
 
-    if okay1 and okay2:
+    if okay1 and okay2 and okay3:
         os.rename( inifile+'.tmptmp', inifile )
 
 #
