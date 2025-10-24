@@ -4,6 +4,9 @@ This script contains functions that deal with modfying the ini files
 import numpy as np
 import bcolors
 
+list_names = ['ux','uy','uz','p','vor','vort','vorticity','vorx','vory','vorz','vorabs','vor-abs','helx','hely','helz','helabs','hel-abs','div','divu','divergence','diss','dissipation','gradpx','gradpy','gradpz','mask','usx','usy','usz','color','sponge']
+list_save_names = ['scalar1', 'scalar2', 'scalar3', 'scalar4', 'scalar5', 'scalar6', 'scalar7', 'scalar8', 'scalar9']
+list_statistics_names = ['ux-avg','ux-var','uy-avg','uy-var','uz-avg','uz-var','p-avg','p-var','umag-avg','umag-var','divu-avg','div-avg','divu-var','div-var','vort-avg','vor-avg','vort-var','vor-var','vorabs-avg','vorabs-var','helabs-avg','helabs-var','dissipation-avg','dissipation-var','uxdx-avg','uxdy-avg','uxdz-avg','uydx-avg','uydy-avg','uydz-avg','uzdx-avg','uzdy-avg','uzdz-avg','uxdx2-avg','uxdy2-avg','uxdz2-avg','uydx2-avg','uydy2-avg','uydz2-avg','uzdx2-avg','uzdy2-avg','uzdz2-avg','ux-2-avg','uy-2-avg','uz-2-avg','uxuy-avg','uxuz-avg','uyuz-avg','uxp-avg','uyp-avg','uzp-avg','uxuy-cov','uxuz-cov','uyuz-cov','uxp-cov','uyp-cov','uzp-cov']
 
 # This routine is WABBIT specific, so it actually belongs in WABBIT_TOOLS
 def check_parameters_for_stupid_errors( file ):
@@ -49,31 +52,33 @@ def check_parameters_for_stupid_errors( file ):
         
     # since 05 Jul 2023, g is set automatically, unless we do something stupid.
     if wavelet == 'CDF20':
-        g_default, Bs_min = 2, 6
+        g_default, Bs_min, Bs_leaf_first = 1, 4, 0
     elif wavelet=='CDF22':
-        g_default, Bs_min = 3, 8
+        g_default, Bs_min, Bs_leaf_first = 2, 6, 6
     elif wavelet=='CDF24':
-        g_default, Bs_min = 5, 12      
+        g_default, Bs_min, Bs_leaf_first = 4, 10, 12
     elif wavelet=='CDF26':
-        g_default, Bs_min = 7, 18
+        g_default, Bs_min, Bs_leaf_first = 6, 14, 18
     elif wavelet=='CDF28':
-        g_default, Bs_min = 9, 24
+        g_default, Bs_min, Bs_leaf_first = 8, 18, 24
     elif wavelet=='CDF40':
-        g_default, Bs_min = 4, 10
+        g_default, Bs_min, Bs_leaf_first = 3, 8, 0
     elif wavelet=='CDF42':
-        g_default, Bs_min = 5, 12
+        g_default, Bs_min, Bs_leaf_first = 4, 10, 12
     elif wavelet=='CDF44':
-        g_default, Bs_min = 7, 18
+        g_default, Bs_min, Bs_leaf_first = 6, 14, 18
     elif wavelet=='CDF46':
-        g_default, Bs_min = 9, 24
+        g_default, Bs_min, Bs_leaf_first = 8, 18, 24
     elif wavelet=='CDF60':
-        g_default, Bs_min = 6, 14
+        g_default, Bs_min, Bs_leaf_first = 5, 12, 0
     elif wavelet=='CDF62':
-        g_default, Bs_min = 7, 18
+        g_default, Bs_min, Bs_leaf_first = 6, 14, 18
     elif wavelet=='CDF64':
-        g_default, Bs_min = 9, 24
+        g_default, Bs_min, Bs_leaf_first = 8, 18, 24
     elif wavelet=='CDF66':
-        g_default, Bs_min = 11, 30
+        g_default, Bs_min, Bs_leaf_first = 10, 22, 30
+    elif wavelet=='CDF80':
+        g_default, Bs_min, Bs_leaf_first = 7, 16, 0
     else:
         Bs_min = 30
         g_default = 1
@@ -87,7 +92,9 @@ def check_parameters_for_stupid_errors( file ):
     g_rhs           = get_ini_parameter(file, 'Blocks', 'number_ghost_nodes_rhs', int, default=g)
     dealias         = get_ini_parameter(file, 'Blocks', 'force_maxlevel_dealiasing', int)
     Neqn            = get_ini_parameter(file, 'Blocks', 'number_equations', int)
+    Neqn_rhs        = get_ini_parameter(file, 'Blocks', 'number_equations_rhs', int, default=Neqn)
     refinement_indicator = get_ini_parameter(file, 'Blocks', 'refinement_indicator', str, default='everywhere')
+    coarsening_indicator = get_ini_parameter(file, 'Blocks', 'coarsening_indicator', str, default='threshold-state-vector')
     dim             = get_ini_parameter(file, 'Domain', 'dim', int)
     L               = get_ini_parameter(file, 'Domain', 'domain_size', vector=True)
     discretization  = get_ini_parameter(file, 'Discretization', 'order_discretization', str)
@@ -115,6 +122,19 @@ def check_parameters_for_stupid_errors( file ):
     filter_freq  = get_ini_parameter( file, 'Discretization', 'filter_freq', int, default=-1)
     useCoarseExtension = get_ini_parameter(file, 'Blocks', 'useCoarseExtension', int, default=0)
     useSecurityZone    = get_ini_parameter(file, 'Blocks', 'useSecurityZone', int, default=0)
+    threshold_state_vector_component = get_ini_parameter(file, 'Blocks', 'threshold_state_vector_component', int, vector=True, default=[])
+
+    # scalars
+    use_passive_scalar = get_ini_parameter(file, 'Scalars', 'use_passive_scalar', int, default=0)
+    N_scalars = get_ini_parameter(file, 'Scalars', 'N_scalars', int, default=0)
+
+    # time statistics
+    time_statistics = get_ini_parameter( file, 'Time-Statistics', 'time_statistics', int, default=0 )
+    N_time_statistics = get_ini_parameter( file, 'Time-Statistics', 'N_time_statistics', int, default=0 )
+    time_statistics_names = get_ini_parameter( file, 'Time-Statistics', 'time_statistics_names', str, vector=True, default=[])
+    read_from_files_time_statistics = exists_ini_parameter( file, 'Time-Statistics', 'read_from_files_time_statistics' )
+    time_statistics_start_time = get_ini_parameter( file, 'Time-Statistics', 'time_statistics_start_time', float, default=0.0 )
+
     
     dx = L[0]*2**-jmax/(bs[0])
     keta = np.sqrt(ceta*nu)/dx
@@ -128,7 +148,7 @@ def check_parameters_for_stupid_errors( file ):
     print("T_max = %2.2f   CFL        = %2.2f CFL_eta = %2.2f  CFL_nu     = %2.3f   time_stepper= %s" % (time_max, CFL, CFL_eta, CFL_nu, time_stepper))
     print("equidistant grids: Jmin=%i^%i, Jmax=%i^%i" % (int(bs[0]*2**jmin), dim, int(bs[0]*2**jmax), dim) )
     
-    if ('CDF4' in wavelet and "4th" in discretization) or ('CDF2'in wavelet and '2nd' in discretization) or ('CDF6' in wavelet and '6th' in discretization):
+    if ('CDF4' in wavelet and "4th" in discretization) or ('CDF2'in wavelet and '2nd' in discretization) or ('CDF6' in wavelet and '6th' in discretization) or ('CDF8' in wavelet and '8th' in discretization):
         print("discretization=%s %s~~>matches wavelet %s%s" % (discretization, bcolors.OKBLUE, wavelet, bcolors.ENDC))
     else:
         print("discretization=%s %s~~>check if that matches wavelet wavelet %s%s" % (discretization, bcolors.FAIL, wavelet, bcolors.ENDC))
@@ -217,11 +237,16 @@ def check_parameters_for_stupid_errors( file ):
     if (adapt_tree and (useCoarseExtension != 1 or useSecurityZone != 1)):
         bcolors.err('For stability it is recommended to set useCoarseExtension=1 and useSecurityZone=1')
     
-    if physics_type == 'ACM-new' and dim == 3 and Neqn != 4:
-        bcolors.err("For 3D ACM, you MUST set number_equations=4 (ux,uy,uz,p)")
-        
-    if physics_type == 'ACM-new' and dim == 2 and Neqn != 3:
-        bcolors.err("For 2D ACM, you MUST set number_equations=3 (ux,uy,p)")
+    Neqn_expected = dim + 1 + (use_passive_scalar*N_scalars) + (time_statistics*N_time_statistics)
+    if physics_type == 'ACM-new' and Neqn != Neqn_expected:
+        bcolors.err(
+            f"For {dim}D ACM, you MUST set number_equations={Neqn_expected} (ux,uy{',uz' if dim == 3 else ''},p"
+            f"{',' + str(N_scalars) + ' scalars' if use_passive_scalar else ''}"
+            f"{',' + str(N_time_statistics) + ' time_statistics' if time_statistics else ''})"
+        )
+    if adapt_tree and coarsening_indicator == 'threshold-state-vector':
+        if len(threshold_state_vector_component) != Neqn:
+            bcolors.err("You use the 'threshold-state-vector' coarsening indicator, so you MUST provide a threshold for EACH of the %i equations. You provided %i values." % (Neqn, len(threshold_state_vector_component)) )
    
     if len(bs) > 1:
         bs = bs[0]
@@ -234,6 +259,9 @@ def check_parameters_for_stupid_errors( file ):
         
     if bs < Bs_min:
         bcolors.err("Block size Bs=%i too small for wavelet %s Bs_min=%i" % (bs, wavelet, Bs_min))
+    
+    if bs < Bs_leaf_first and adapt_tree==1:
+        bcolors.warn("Block size Bs=%i too small for wavelet %s to use leaf_first adaption algorithm (Bs=%i). Performance will be slightly reduced" % (bs, wavelet, Bs_leaf_first))
           
     if g < g_default:
         bcolors.err("Not enough ghost nodes for wavelet %s g=%i < %i" % (wavelet, g, g_default) )
@@ -337,21 +365,28 @@ def check_parameters_for_stupid_errors( file ):
     field_names = get_ini_parameter( file, 'Saving', 'field_names', str, vector=True)
     
     if len(field_names) != N_fields_saved:
-        bcolors.err("You set N_fields_saved=%i but did not give the right number of names!" %(N_fields_saved))
+        bcolors.err("You set N_fields_saved=%i but did not give the right number of names (%i given)!" %(N_fields_saved, len(field_names)))
         print(field_names)
     
-    if "vor" in field_names and dim==2:
-        # JB: those errors are outdated
-        if not field_names[0] == "vor":
-            bcolors.err('You want to save the vorticity, but you MUST choose this as first entry in field_names. Strange, right? At least it is nice outside. Go play.')
-        if N_fields_saved < 3:
-            bcolors.err('You want to save the vorticity, you MUST save at least 3 fields. Strange, right? Time for a drink.')
-    
     for field_name in field_names:
-        if not field_name in ['ux', 'Ux', 'UX', 'uy', 'Uy', 'UY', 'uz', 'Uz', 'UZ', 'p', 'P', 'vor', 'div', 'mask', 'usx', 'usy', 'usz', 'color', 'sponge', 'scalar1', 'scalar2', 'scalar3']:
+        if not field_name in list_names and not field_name in list_save_names and not field_name in list_statistics_names:
             bcolors.err('In field_names for saving, you have set %s_ %s _%s but that it might not be a valid choice! (List might not be up to date)' % (bcolors.FAIL,field_name, bcolors.ENDC))
     
-    
+    # ----------------- time statistics section -----------------------------
+    if time_statistics:
+        if N_time_statistics != len( time_statistics_names ):
+            bcolors.err("You set N_time_statistics=%i but did not give the right number of names (%i given)!" %(N_time_statistics, len( time_statistics_names )))
+
+        for name in time_statistics_names:
+            if not name in list_statistics_names:
+                bcolors.err('In time_statistics_names, you have set %s_ %s _%s but that it might not be a valid choice! (List might not be up to date)' % (bcolors.FAIL,name, bcolors.ENDC))
+
+        if time_statistics_start_time == 0.0:
+            bcolors.warn('You set time_statistics_start_time=0.0, are you sure you do not want to pass an initial transient?')
+        
+        if Neqn_rhs != Neqn - N_time_statistics:
+            bcolors.warn(f'You have time statistics enabled, you can set number_equations_rhs={Neqn - N_time_statistics} for performance optimizations.')
+      
     
     #-------------------------------
     # loop over ini file and check that each non-commented line with a "=" contains the trailing semicolon ";"
@@ -375,10 +410,18 @@ def check_parameters_for_stupid_errors( file ):
 
         infiles = get_ini_parameter( file, 'Physics', 'input_files', str)
         infiles = infiles.split()
+
+        if time_statistics and read_from_files_time_statistics:
+            if len(infiles) != dim + 1 + N_time_statistics:
+                raise ValueError(f"You set read_from_files_time_statistics=1 but did not give the right number of input files ({dim+1}+N_time_statistics={N_time_statistics} needed)!")
+        else:
+            if len(infiles) != dim + 1:
+                raise ValueError(f"You set read_from_files=1 but did not give the right number of input files ({dim+1} needed)!")
+
         for file in infiles:
             print(file)
             if not os.path.isfile(file):
-                raise ValueError("CRUTIAL: read_from_files=1 but infiles NOT found!.")
+                raise ValueError("CRITICAL: read_from_files=1 but infile NOT found! (%s)" % (file))
     else:
         bcolors.info("This simulation is being started from initial condition (and not from file)")
 
