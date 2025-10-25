@@ -374,7 +374,7 @@ def check_parameters_for_stupid_errors( file ):
     
     # ----------------- time statistics section -----------------------------
     if time_statistics:
-        if N_time_statistics != len( time_statistics_names ):
+        if read_from_files_time_statistics and N_time_statistics != len( time_statistics_names ):
             bcolors.err("You set N_time_statistics=%i but did not give the right number of names (%i given)!" %(N_time_statistics, len( time_statistics_names )))
 
         for name in time_statistics_names:
