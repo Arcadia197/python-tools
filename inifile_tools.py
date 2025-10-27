@@ -132,7 +132,7 @@ def check_parameters_for_stupid_errors( file ):
     time_statistics = get_ini_parameter( file, 'Time-Statistics', 'time_statistics', int, default=0 )
     N_time_statistics = get_ini_parameter( file, 'Time-Statistics', 'N_time_statistics', int, default=0 )
     time_statistics_names = get_ini_parameter( file, 'Time-Statistics', 'time_statistics_names', str, vector=True, default=[])
-    read_from_files_time_statistics = exists_ini_parameter( file, 'Time-Statistics', 'read_from_files_time_statistics' )
+    read_from_files_time_statistics = get_ini_parameter( file, 'Time-Statistics', 'read_from_files_time_statistics', bool, default=False )
     time_statistics_start_time = get_ini_parameter( file, 'Time-Statistics', 'time_statistics_start_time', float, default=0.0 )
 
     
@@ -374,7 +374,7 @@ def check_parameters_for_stupid_errors( file ):
     
     # ----------------- time statistics section -----------------------------
     if time_statistics:
-        if read_from_files_time_statistics and N_time_statistics != len( time_statistics_names ):
+        if N_time_statistics != len( time_statistics_names ):
             bcolors.err("You set N_time_statistics=%i but did not give the right number of names (%i given)!" %(N_time_statistics, len( time_statistics_names )))
 
         for name in time_statistics_names:
@@ -385,7 +385,7 @@ def check_parameters_for_stupid_errors( file ):
             bcolors.warn('You set time_statistics_start_time=0.0, are you sure you do not want to pass an initial transient?')
         
         if Neqn_rhs != Neqn - N_time_statistics:
-            bcolors.warn(f'You have time statistics enabled, you can set number_equations_rhs={Neqn - N_time_statistics} for performance optimizations.')
+            bcolors.warn(f'You have time statistics enabled, you can set number_equations_rhs={Neqn - N_time_statistics} for memory and performance optimizations.')
       
     
     #-------------------------------
@@ -413,7 +413,7 @@ def check_parameters_for_stupid_errors( file ):
 
         if time_statistics and read_from_files_time_statistics:
             if len(infiles) != dim + 1 + N_time_statistics:
-                raise ValueError(f"You set read_from_files_time_statistics=1 but did not give the right number of input files ({dim+1}+N_time_statistics={N_time_statistics} needed)!")
+                raise ValueError(f"You set read_from_files_time_statistics=1 but did not give the right number of input files ({dim+1} + {N_time_statistics} N_time_statistics needed)!")
         else:
             if len(infiles) != dim + 1:
                 raise ValueError(f"You set read_from_files=1 but did not give the right number of input files ({dim+1} needed)!")
