@@ -1048,6 +1048,15 @@ def plot_wabbit_dir(d, **kwargs):
 
 # extract from numerical treecode the digit at a specific level
 def tc_get_digit_at_level(tc_b, level, max_level=21, dim=3):
+    # cast to plain Python int (scalar) or int64 (array): treecode/level/max_level are
+    # sometimes narrower numpy dtypes (e.g. int32, as "level" is stored in the HDF5 file),
+    # and mixing those with the wide values 2**(dim*max_level) can needs can overflow int32/int64
+    dim, max_level = int(dim), int(max_level)
+    if isinstance(tc_b, np.ndarray): tc_b = tc_b.astype(np.int64)
+    else: tc_b = int(tc_b)
+    if isinstance(level, np.ndarray): level = level.astype(np.int64)
+    else: level = int(level)
+
     result = (tc_b // (2**(dim*(max_level - level))) % (2**dim))
     if isinstance(tc_b, np.ndarray):
         if isinstance(level, np.ndarray):
@@ -1062,10 +1071,17 @@ def tc_get_digit_at_level(tc_b, level, max_level=21, dim=3):
 
 # set for numerical treecode the digit at a specific level
 def tc_set_digit_at_level(tc_b, digit, level, max_level=21, dim=3):
+    # see tc_get_digit_at_level: force wide/plain int types to avoid int32 overflow
+    dim, max_level = int(dim), int(max_level)
+    if isinstance(tc_b, np.ndarray): tc_b = tc_b.astype(np.int64)
+    else: tc_b = int(tc_b)
+    if isinstance(level, np.ndarray): level = level.astype(np.int64)
+    else: level = int(level)
+
     # compute digit that is currently there
     result = (tc_b // (2**(dim*(max_level - level))) % (2**dim))
     # subtract old digit, add new one
-    tc_b += (-result + digit) * (2**(dim*(max_level - level))) 
+    tc_b += (-result + digit) * (2**(dim*(max_level - level)))
 
     if isinstance(tc_b, np.ndarray):
         return tc_b.astype(int)
@@ -1107,12 +1123,19 @@ def tc_decoding(treecode, level=None, dim=3, max_level=21):
     - ix: list of int, block position coordinates
     """
     
-    n_level = max_level if level is None else level
+    # force plain Python ints (arbitrary precision): treecode/level/max_level can arrive
+    # as narrower numpy dtypes (e.g. int32, since "level" is stored that way in the HDF5
+    # file), and mixing those with a >31-bit treecode in "treecode >> shift" raises
+    # OverflowError (or, for numpy right-shift, silently produces wrong bits)
+    treecode = int(treecode)
+    dim = int(dim)
+    max_level = int(max_level)
+    n_level = max_level if level is None else int(level)
     if n_level < 0: n_level = max_level + n_level + 1
-    
+
     # 1-based
     ix = [1] * dim
-    
+
     for i_level in range(n_level):
         for i_dim in range(dim):
             shift = (i_level + max_level - n_level) * dim + i_dim
@@ -1163,17 +1186,20 @@ def tca_2_tcb(tca, dim=3, max_level=21):
     
     NOTE: This routine seems to work only correctly if max_level=21 is given.
     """
-    # allocation
-    tcb = np.zeros(tca.shape[0])
-    
+    # allocation - int64, not the float64 default: accumulating bits up to 2**(dim*max_level)
+    # (up to 2**63) needs more precision than float64's 53-bit mantissa can hold exactly
+    tcb = np.zeros(tca.shape[0], dtype=np.int64)
+
     # maximum level is length of TCA array
     Jmax = tca.shape[1]
     
     # loop over the levels (j); in the TCA array, each level has its own int
     for j in range(0, Jmax):
         # extract the digit for all TCA in the array in one go (slice)
-        tc_digit = tca[:, j]
-        
+        # cast to int64: tca stores digits as float64 (exact, since digits are small),
+        # but tcb accumulates in int64 and numpy forbids in-place float64 -> int64 add
+        tc_digit = tca[:, j].astype(np.int64)
+
         # increase level where digit is not -1
         tcb[tc_digit != -1] += tc_digit[tc_digit != -1] * 2**( dim*(max_level-1 - j) )
         
@@ -1456,10 +1482,8 @@ def plot_wabbit_file( wabbit_obj:WabbitHDF5file, savepng=False, savepdf=False, c
                      colorbar_orientation="vertical",
                      gridonly_coloring='mpirank', flipud=False, 
                      fileContainsGhostNodes=False, 
-                     filename_png=None,
-                     filename_pdf=None,
-                     ncolors=None,
-                     color_exponent=1.0):
+                     filename_png=None, filename_pdf=None,
+                     ncolors=None, color_exponent=1.0, color_norm='linear'):
     """
     Read and plot a 2D wabbit file. Not suitable for 3D data, use Paraview for that.
     
@@ -1485,8 +1509,11 @@ def plot_wabbit_file( wabbit_obj:WabbitHDF5file, savepng=False, savepdf=False, c
     import matplotlib.patches as patches
     import matplotlib.pyplot as plt
     import h5py
-    from matplotlib.colors import BoundaryNorm
-    
+    from matplotlib.colors import BoundaryNorm, LogNorm
+
+    if color_norm not in ('linear', 'log'):
+        raise ValueError(bcolors.FAIL + "ERROR! color_norm must be either 'linear' or 'log'" + bcolors.ENDC)
+
     # Create colormap with optional discretization and power-law distribution
     cmap, boundaries_normalized = create_colormap(cmap, ncolors, color_exponent)
     
@@ -1684,6 +1711,13 @@ def plot_wabbit_file( wabbit_obj:WabbitHDF5file, savepng=False, savepdf=False, c
             boundaries = boundaries_normalized * (vmax - vmin) / 2.0 + (vmax + vmin) / 2.0
             norm = BoundaryNorm(boundaries, ncolors)
             # Apply norm to all plots
+            for hplots in h:
+                hplots.set_norm(norm)
+        elif color_norm == 'log':
+            # Logarithmic color normalization; LogNorm requires strictly positive vmin
+            if vmin <= 0:
+                raise ValueError(bcolors.FAIL + "ERROR! color_norm='log' requires strictly positive data (vmin=%g <= 0)" % vmin + bcolors.ENDC)
+            norm = LogNorm(vmin=vmin, vmax=vmax)
             for hplots in h:
                 hplots.set_norm(norm)
 

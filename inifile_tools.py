@@ -376,7 +376,7 @@ def check_parameters_for_stupid_errors( file ):
         bcolors.err('For stability it is recommended to set useCoarseExtension=1 and useSecurityZone=1')
     
     Neqn_expected = dim + 1 + (use_passive_scalar*N_scalars) + (time_statistics*N_time_statistics)
-    Neqn_expected_rhs = dim + 1 + (use_passive_scalar*N_scalars) + (time_statistics*N_time_statistics)
+    Neqn_expected_rhs = dim + 1 + (use_passive_scalar*N_scalars)
     if physics_type == 'ACM-new' and Neqn != Neqn_expected:
         bcolors.err(
             f"For {dim}D ACM, you MUST set number_equations={Neqn_expected} (ux,uy{',uz' if dim == 3 else ''},p"
@@ -386,8 +386,7 @@ def check_parameters_for_stupid_errors( file ):
     if physics_type == 'ACM-new' and Neqn_rhs != Neqn_expected_rhs:
         bcolors.err(
             f"For {dim}D ACM, you MUST set number_equations_rhs={Neqn_expected_rhs} (ux,uy{',uz' if dim == 3 else ''},p"
-            f"{',' + str(N_scalars) + ' scalars' if use_passive_scalar else ''}"
-            f"{',' + str(N_time_statistics) + ' time_statistics' if time_statistics else ''})"
+            f"{',' + str(N_scalars) + ' scalars' if use_passive_scalar else ''})"
         )
     if adapt_tree and coarsening_indicator == 'threshold-state-vector':
         if len(threshold_state_vector_component) != Neqn:
@@ -636,7 +635,7 @@ def get_ini_parameter( inifile, section, keyword, dtype=float, vector=False, def
 
     # check if the file exists, at least
     if not os.path.isfile(inifile):
-        raise ValueError("Stupidest error of all: we did not find the INI file.")
+        raise ValueError(f"Stupidest error of all: we did not find the INI file: {inifile}")
 
 
     # a matrix is something that starts with (/ (FORTRAN style) and it extends
