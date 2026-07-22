@@ -292,7 +292,7 @@ def block_data_to_local_order(block_data, dim):
   return local_order
 
 
-def hdf2vtkhdf(w_obj: wabbit_tools.WabbitHDF5file, save_file=None, verbose=True, save_mode="appended", scalars=False, split_levels=False, merge=True, prune_tolerance=None, grid2field=None, data_type="CellData", exclude_prefixes=[], include_prefixes=[], origin_translate=[0,0,0], scale=1, plane_2D="XY"):
+def hdf2vtkhdf(w_obj: wabbit_tools.WabbitHDF5file, save_file=None, verbose=True, save_mode="appended", scalars=False, split_levels=False, merge=True, prune_tolerance=None, grid2field=None, data_type="CellData", exclude_prefixes=[], include_prefixes=[], origin_translate=[0,0,0], scale=1, plane_2D="XY", low_memory=False):
   """
   Create a multi block dataset from the available data
     w_obj        - Required  : Object representeing the wabbit data or List of objects
@@ -303,6 +303,22 @@ def hdf2vtkhdf(w_obj: wabbit_tools.WabbitHDF5file, save_file=None, verbose=True,
     scalars      - Optional  : should vectors be identified or all included as scalars?
     split_levels - Optional  : For full-tree grids blocks are overlapping. This option entangles the blocks level-wise by giving them an offset
     merge        - Optional  : This option tries to merge sisters consecutively to minimize the amount of uniform blocks to load for paraview
+    low_memory   - Optional  : How to fetch the actual block DATA for this timestep (the metadata in w_obj is always fully
+                               loaded already - it is cheap). w_obj itself never holds the heavy block arrays; instead, a
+                               local "block_cache" (one dict per variable, see below) is built right before it is needed and
+                               discarded again once this function returns - so the long-lived w_obj objects (which callers
+                               may keep around for many timesteps, e.g. in a {time: [w_obj, ...]} map) never accumulate
+                               block data across timesteps.
+                                 False (default, "mode B"): read each variable's ENTIRE block array once, in one bulk HDF5
+                                   call (WabbitHDF5file.block_read_bulk(block_ids=None)). Fastest, needs one timestep's
+                                   data (all variables) to fit in RAM - fine unless the grid is very large/high-res or many
+                                   MPI ranks share a node's RAM.
+                                 True ("mode C"): first figure out exactly which blocks THIS RANK needs (its slice of the
+                                   merged grid below), then read only that subset per variable, again in one bulk call per
+                                   variable (block_read_bulk(block_ids=[...])). Keeps memory down to ~1/mpi_size of the
+                                   data, at the cost of one extra bookkeeping pass before reading.
+                               Either way we avoid the slow path of calling block_read() once per sub-block (which opens
+                               and closes the HDF5 file on every single call - by far the dominant cost for large grids).
   """
   ### Check if input contains only wabbit hdf5 files
   correct_input = False
@@ -552,9 +568,42 @@ def hdf2vtkhdf(w_obj: wabbit_tools.WabbitHDF5file, save_file=None, verbose=True,
     if minutes > 0: print(f"    Created metadata:                      took {int(minutes)}m {seconds:04.1f}s")
     else: print(f"    Created metadata:                      took {seconds:.2g}s")
 
+  ### fetch the actual block DATA this rank will need for the loop below, in one bulk read per
+  # variable file rather than one file-open per sub-block (see block_read_bulk() in wabbit_tools.py
+  # for why that matters - it is by far the dominant cost for large grids). The result is a plain,
+  # local list of dicts - "block_cache[i_n][i_b_now]" gives the same array block_read(i_b_now) on
+  # w_obj_list[i_n] would have returned, just fetched all at once. This cache lives only for the
+  # duration of this function call and is never attached to the w_obj_list objects themselves, so
+  # a caller that keeps w_obj_list around for many timesteps (e.g. hdf2vtkhdf.py's time_process
+  # dict) never accumulates block data in memory across timesteps.
+  start_time = time.time()
+  i_block_start, i_block_end = int(mpi_rank/mpi_size*total_blocks), int((mpi_rank+1)/mpi_size*total_blocks)
+  # every variable index (both plain scalars and each component of a vector) that block data is
+  # actually read from below - this is what we need to preload per w_obj_list entry
+  all_var_ind = s_ind + [i_ndim for group in v_ind for i_ndim in group]
+  if not low_memory:
+    # mode B (default): read every needed variable file fully, once, in a single bulk HDF5 call
+    block_cache = [w_obj_list[i_n].block_read_bulk() if i_n in all_var_ind else {} for i_n in range(len(w_obj_list))]
+  else:
+    # mode C (--low-memory): first walk through this rank's slice of the merged grid to collect
+    # exactly which (per-variable) logical block ids it will touch - the same (treecode,level) ->
+    # block id translation as the actual attach loop below, just to gather ids, not to read data -
+    # then read only that subset per variable, again in a single bulk call each.
+    needed_ids = [set() for _ in w_obj_list]
+    for i_block in range(i_block_start, i_block_end):
+      for i_merged_id in block_id[i_block]:
+        tc_now, lvl_now = w_main.block_treecode_num[i_merged_id], w_main.level[i_merged_id]
+        for i_n in all_var_ind:
+          needed_ids[i_n].add(w_obj_list[i_n].get_block_id(tc_now, lvl_now))
+    block_cache = [w_obj_list[i_n].block_read_bulk(needed_ids[i_n]) if i_n in all_var_ind else {} for i_n in range(len(w_obj_list))]
+  if args.verbose and mpi_rank == 0:
+    minutes, seconds = divmod(time.time() - start_time, 60)
+    if minutes > 0: print(f"    Preloaded block data:                  took {int(minutes)}m {seconds:04.1f}s")
+    else: print(f"    Preloaded block data:                  took {seconds:.2g}s")
+
   ### independent loop attaching the actual data - this is parallelized
   start_time = time.time()
-  for i_block in range(int(mpi_rank/mpi_size*total_blocks), int((mpi_rank+1)/mpi_size*total_blocks)):
+  for i_block in range(i_block_start, i_block_end):
     rem_time = (total_blocks - i_block) * (time.time() - start_time) / (i_block + 1e-4*(i_block == 0))
     # Format remaining time in HH:MM:SS format
     hours, rem = divmod(rem_time, 3600)
@@ -578,7 +627,7 @@ def hdf2vtkhdf(w_obj: wabbit_tools.WabbitHDF5file, save_file=None, verbose=True,
       for i_merged in range(len(id_now)):
         # translate id from main to this object as the block ids could be shuffled
         i_b_now = w_obj_list[i_n].get_block_id(w_main.block_treecode_num[id_now[i_merged]], w_main.level[id_now[i_merged]])
-        j_block = w_obj_list[i_n].block_read(i_b_now)
+        j_block = block_cache[i_n][i_b_now]  # preloaded above (mode B: full array, mode C: this rank's subset)
         # get block position of this sub-octree, in the SAME local (x, y, thickness/z) order as bs_o
         b_id = sub_tree_position[i_block][i_merged].astype(int)
         if w_main.dim == 2: b_id = np.append(b_id, 0)
@@ -602,7 +651,7 @@ def hdf2vtkhdf(w_obj: wabbit_tools.WabbitHDF5file, save_file=None, verbose=True,
         for i_merged in range(len(id_now)):
           # translate id from main to this object as the block ids could be shuffled
           i_b_now = w_obj_list[i_ndim].get_block_id(w_main.block_treecode_num[id_now[i_merged]], w_main.level[id_now[i_merged]])
-          j_block = w_obj_list[i_ndim].block_read(i_b_now)
+          j_block = block_cache[i_ndim][i_b_now]  # preloaded above (mode B: full array, mode C: this rank's subset)
           # get block position of this sub-octree, in the SAME local (x, y, thickness/z) order as bs_o
           b_id = sub_tree_position[i_block][i_merged].astype(int)
           if w_main.dim == 2: b_id = np.append(b_id, 0)
@@ -994,6 +1043,11 @@ if __name__ == "__main__":
   parser.add_argument("--cvs-split-levels", help="For overfull CVS grids, divide them by levels", action="store_true")
   parser.add_argument("-m", "--merge-grid", help="Use the merge algorithm to merge full sister blocks", action="store_true")
 
+  parser.add_argument("--low-memory", help="""Read block data for this timestep in small batches (only the blocks a given
+  MPI rank actually needs), instead of loading each variable's entire block array into RAM at once. Slower to prepare (an
+  extra bookkeeping pass to figure out which blocks are needed) but keeps the per-rank memory footprint down - use this if
+  a single timestep does not fit in memory (very large/high-resolution grids, or many local MPI ranks on one node).""", action="store_true")
+
   parser.add_argument("-v", "--verbose", help="Enable verbose output", action="store_true")
 
   parser.add_argument("-t", "--time-bundle", help="Bundle all htg files for different times to one file. Works only for folders as input and for --vtkhdf or --htg1.", action="store_true")
@@ -1006,7 +1060,7 @@ if __name__ == "__main__":
 
   parser.add_argument("--origin", help="Ability to move the origin in 3D space", default=[0, 0, 0], nargs=3, type=float)
   parser.add_argument("--scale", help="Ability to rescale the data in 3D space", default=1, type=float)
-  parser.add_argument("--2D-plane", help="In what plane lies the 2D grid? Options are XY, XZ or YZ", default="XY", type=str)
+  parser.add_argument("--2D-plane", help="If the data is 2D, in what plane lies the grid? Options are XY, XZ or YZ", default="XY", type=str)
 
   # parser.add_argument("-n", "--time-by-fname", help="""How shall we know at what time the file is? Sometimes, you'll end up with several
   # files at the same time, which have different file names. Then you'll want to
@@ -1145,7 +1199,7 @@ if __name__ == "__main__":
 
     # create vtkhdf
     if args.vtkhdf:
-      hdf2vtkhdf(time_process[i_time], save_file=f"{args.outfile}_{wabbit_tools.time2wabbitstr(i_time)}", verbose=args.verbose, scalars=args.scalars, split_levels=args.cvs_split_levels, merge=args.merge_grid, prune_tolerance=args.prune_tolerance, data_type="CellData" if not args.point_data else "PointData", exclude_prefixes=args.exclude_prefixes, include_prefixes=args.include_prefixes, grid2field=args.grid2field, origin_translate=args.origin, scale=args.scale, plane_2D=args.__dict__["2D_plane"])
+      hdf2vtkhdf(time_process[i_time], save_file=f"{args.outfile}_{wabbit_tools.time2wabbitstr(i_time)}", verbose=args.verbose, scalars=args.scalars, split_levels=args.cvs_split_levels, merge=args.merge_grid, prune_tolerance=args.prune_tolerance, data_type="CellData" if not args.point_data else "PointData", exclude_prefixes=args.exclude_prefixes, include_prefixes=args.include_prefixes, grid2field=args.grid2field, origin_translate=args.origin, scale=args.scale, plane_2D=args.__dict__["2D_plane"], low_memory=args.low_memory)
 
     # output timing
     if args.verbose and mpi_rank == 0:

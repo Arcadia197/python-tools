@@ -14,6 +14,7 @@ import copy
 from inifile_tools import *
 from analytical_functions import *
 import logging
+import time
 
 
 def read_wabbit_hdf5_legacy(fname_wabbit):
@@ -98,8 +99,13 @@ class WabbitHDF5file:
     iteration = total_number_blocks = max_level = dim = domain_size = []
 
     # lets define all fields
+    # NOTE: "blocks" is only ever filled by read(read_var in ["blocks","all"]) - normally, and
+    # always for large grids, it stays empty and block data is instead fetched from disk on demand,
+    # one or many blocks at a time, via block_read()/block_read_bulk() below.
     blocks = np.array([])              # array of blocks, shape Nblocks, Bs[3], Bs[2], Bs[1]
-    blocks_order = np.array([])  # in case we are reordering, this is used for reading back the blocks in the original order
+    blocks_order = np.array([])  # logical block index i_b -> row in the on-disk 'blocks' dataset.
+    # Starts as the identity (np.arange). sort_list(do_resorting=True) is the only place this becomes
+    # a real permutation (the sort order), see block_read() below for how it is then used.
     coords_origin = np.array([])       # origin of each block, being a vector of x0, y0, [z0] for each block [POSSIBLY STARTING FROM Z, CHECK]
     coords_spacing = np.array([])      # spacing between grid points, being a vector of dx, dy, [dz] for each block [POSSIBLY STARTING FROM Z, CHECK]
     block_treecode_num = np.array([])  # numerical treecode
@@ -126,7 +132,8 @@ class WabbitHDF5file:
     """    
     def read(self, file, read_var='all', verbose=True):
         if verbose:
-            print(f"Reading {read_var} of file= {file}")
+            start_time = time.time()
+            print(f"Reading {read_var} of file= {file}", end='')
         fid = h5py.File(file,'r')
         dset_id = fid.get('blocks')
 
@@ -252,6 +259,11 @@ class WabbitHDF5file:
                 raise ValueError(f'Inconsistency found: block spacing stored in coords_spacing and the one computed from level do not match! B{i} - {dx_this} vs {dx_comp}')
             if np.max(np.abs(block_treecode_this-block_treecode_comp)) > 0:
                 raise ValueError(f'Inconsistency found: block treecode array stored in block_treecode and the one computed from (treecode,level) do not match! B{i} - {block_treecode_this} vs {block_treecode_comp}')
+        
+        if verbose:
+            minutes, seconds = divmod(time.time() - start_time, 60)
+            if minutes > 0: print(f"    took {int(minutes)}m {seconds:04.1f}s")
+            else: print(f"    took {seconds:.2g}s")
 
     # init a wabbit state by data
     # A grid is uniquely defined by its dimension (from blocks), block size (from blocks), domain size
@@ -418,7 +430,17 @@ class WabbitHDF5file:
 
 
     # for large data, we do not want to read all block values at once, as it is simply not feasible
-    # however, we might still want to read or write single blocks, so those functions deal with that
+    # (a run can have anywhere from ~1e2 to ~1e5 blocks, each up to ~20**3 points) - so after read()
+    # with read_var="meta" only the light per-block metadata (coords, level, treecode, ...) is in
+    # memory, and the heavy "blocks" dataset is read from disk block-by-block, on demand, right here.
+    #
+    # i_b below is a LOGICAL block index - the same numbering used everywhere else in this class
+    # (get_block_id(), tc_find, ...). It is NOT necessarily the row the block occupies in the on-disk
+    # 'blocks' dataset: self.blocks_order translates logical index -> disk row, and is the identity
+    # (np.arange) unless sort_list(do_resorting=True) was called, in which case it holds the sort
+    # permutation instead (see sort_list() for details). Every place that indexes the file's 'blocks'
+    # dataset by a logical index - here, in block_write(), and in block_read_bulk() below - must go
+    # through self.blocks_order first to stay consistent with each other.
     def block_read(self, i_b, file=None):
         # some safety checks
         file_read = self.orig_file if not file else file
@@ -434,6 +456,10 @@ class WabbitHDF5file:
             print("Tried to access a block outside block range")
             return None
 
+        # opens+closes the file for every single call - fine for the occasional one-off lookup
+        # (e.g. prune_grid()), but far too slow if you need many blocks: every call pays a full
+        # HDF5 file-open. For reading many blocks at once, use block_read_bulk() instead, which
+        # does exactly one indexed HDF5 read no matter how many blocks are requested.
         fid = h5py.File(file_read,'r')
         block = fid['blocks'][self.blocks_order[i_b], :]
         fid.close()
@@ -459,7 +485,52 @@ class WabbitHDF5file:
         fid['blocks'][self.blocks_order[i_b], :] = block  # we assume here that block sizes are equal
         fid.close()
         return
-            
+
+
+    # Batched counterpart to block_read(): fetches MANY blocks in a single HDF5 access instead of
+    # one file-open per block, which is the whole point - opening/seeking/closing the file thousands
+    # of times (once per block) is by far the dominant cost when converting large grids, far more
+    # than the actual bytes read. This is deliberately kept STATELESS: the result is returned to the
+    # caller as a plain dict and nothing is stored on self. That keeps WabbitHDF5file objects cheap
+    # (metadata only) even when a caller (e.g. hdf2vtkhdf.py) needs to hold several timesteps'
+    # objects in memory at once - only the caller's local dict grows and shrinks with the data it
+    # actually needs at that moment, the WabbitHDF5file objects themselves never carry heavy arrays.
+    #
+    # Two use cases ("reading modes"), both go through the exact same code path here:
+    #   - block_ids=None            : read the WHOLE 'blocks' dataset in one shot ("mode B" in
+    #                                  hdf2vtkhdf.py - the default). Fastest, but needs the full
+    #                                  file's block data to fit in RAM.
+    #   - block_ids=[i_b1, i_b2, ..]: read only that SUBSET of logical block indices in one shot
+    #                                  ("mode C" in hdf2vtkhdf.py, enabled by --low-memory). Keeps
+    #                                  memory bounded to only the blocks actually needed (e.g. one
+    #                                  MPI rank's share of a merged grid), at the cost of the caller
+    #                                  having to first figure out which ids it needs.
+    def block_read_bulk(self, block_ids=None, file=None):
+        file_read = self.orig_file if not file else file
+        if not file_read:
+            print("Tried to bulk-read blocks but no file is given")
+            return {}
+
+        if block_ids is None:
+            logical_ids = np.arange(self.total_number_blocks)
+        else:
+            # dedupe (a block may be requested more than once, e.g. shared by several merged groups)
+            logical_ids = np.unique(np.asarray(list(block_ids), dtype=int))
+        if logical_ids.size == 0:
+            return {}
+
+        # translate logical indices to on-disk rows (see the docstring above block_read()). h5py's
+        # fancy indexing on a dataset requires strictly increasing indices, so we read in disk-row
+        # order and use sort_by_disk_row to remember which logical id each returned row belongs to.
+        disk_rows = self.blocks_order[logical_ids].astype(int)
+        sort_by_disk_row = np.argsort(disk_rows)
+
+        fid = h5py.File(file_read, 'r')
+        data = fid['blocks'][disk_rows[sort_by_disk_row], :]  # ONE indexed read for all requested blocks
+        fid.close()
+
+        return {int(logical_ids[sort_by_disk_row[row]]): data[row] for row in range(len(logical_ids))}
+
 
     # define the == operator for objects
     # this is only true if objects are 100% similar
